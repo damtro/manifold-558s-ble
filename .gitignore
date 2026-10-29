@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Captures and dumps: may contain device addresses and serial numbers, never publish
+*.cfa
+*.log
+*.b64
+btsnoop_hci*
+dumpState*
+dumpstate*
+*.zip
+*.txt
+!requirements.txt
+
+# Photos
+*.jpg
+*.jpeg
+*.png
+*.heic
+
+# File sync clients
+.sync_*.db*
+.owncloudsync.log

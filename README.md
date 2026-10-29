@@ -1,0 +1,153 @@
+# manifold-558s-ble
+
+Read live measurements from a **testo 558s** digital refrigeration manifold over Bluetooth LE, from a PC, in Python, without the vendor app.
+
+> **Independent, unofficial project.**
+> It is not affiliated with, endorsed by or supported by Testo SE & Co. KGaA.
+> "testo" is a trademark of Testo SE & Co. KGaA, used here only to identify compatible hardware.
+
+*Résumé en français [en bas de page](#résumé-en-français).*
+
+## Hardware
+
+| Device | Status |
+|---|---|
+| testo 558s digital manifold | Live values read on Windows 10 with [bleak](https://github.com/hbldh/bleak) |
+| testo 115i clamp thermometer (Smart Probe) | Seen through the 558s as channel T1; direct connection only lists GATT services |
+
+Other testo Bluetooth instruments may use the same framing, but they have not been tested.
+
+## How the protocol was documented
+
+The description below comes from **observing** the Bluetooth traffic between the author's own 558s and the author's own phone, during normal use of the vendor app (Android "Bluetooth HCI snoop log").
+No vendor software was decompiled or disassembled, and no vendor file is included in this repository.
+The goal is interoperability: reading one's own measurements on one's own computer.
+
+## Protocol
+
+### GATT
+
+| Service | Characteristic | Use |
+|---|---|---|
+| `fff0` | `fff1` | write: commands (write with response) |
+| `fff0` | `fff2` | notify: replies and measurement pushes |
+
+The phone negotiated an ATT MTU of 517.
+Find `fff1` / `fff2` by UUID: handle numbers differ between operating systems (on Windows, bleak reports the declaration handle).
+
+### Frame
+
+```
+cmd (1) | seq (1) | length (u32 LE) | CRC16 (2) | payload (length - 2) | CRC16 (2)
+```
+
+- The header CRC covers the 6 bytes before it.
+- `length` counts the payload **and** its CRC; it is 0 when there is no payload (then no payload CRC either).
+- CRC = **CRC-16/MODBUS** (poly 0xA001 reflected, init 0xFFFF), stored little-endian.
+- Strings are `length (u32 LE)` followed by ASCII bytes.
+- Notifications may split one frame: reassemble using `length`.
+
+### Commands seen
+
+| Sent | Meaning |
+|---|---|
+| `56 00`, payload `02` | session start (exact meaning unknown) |
+| `20 01`, no payload | session start (exact meaning unknown) |
+| `04 <seq>`, payload = string | read a property by name, e.g. `FirmwareVersion`, `CurrentRefrigerant`; reply has cmd `07` |
+| `11 <seq>`, no payload | subscribe; the device then pushes frames with cmd `10`, seq `80` |
+
+The startup sequence used by the vendor app, and by `testo558.py`, is:
+
+```
+5600030000000c69023e81   56 00 + payload 02
+2001000000003abb         20 01
+04 ...                   optional property reads
+110400000000f29a         11 (subscribe)
+```
+
+### Measurement push
+
+Pushed frames carry a string name, then data.
+`Measurement.Values` arrives about every 0.8 s:
+
+```
+name "Measurement.Values" | count (u32 LE) | count × [ channel id (u32 LE) | value (float32 LE) | status (u16 LE) ]
+```
+
+| Id | Channel |
+|---|---|
+| `0x01` | low pressure (LP) |
+| `0x02` | high pressure (HP) |
+| `0x03` | temperature T1 |
+| `0x04` | temperature T2 |
+| `0x0B` | atmospheric pressure (Pa) |
+| `0x0F` | evaporation temperature |
+| `0x10` | condensation temperature |
+| `0x11` | superheat |
+| `0x13` | subcooling |
+| `0x26`, `0x27`, `0x31` | battery levels |
+
+Status `0x0800` means "no measurement" on that channel.
+Other pushes seen: `Errorstate`, `DataSync`, `Logging.RemainingRunTime`.
+
+Temperatures were checked against the instrument display (for example 19.53 decoded, 19.5 displayed).
+
+## Usage
+
+```bash
+pip install -r requirements.txt
+python scan.py                          # find the 558s address
+python testo558.py AA:BB:CC:DD:EE:FF    # live values for 20 s
+python testo558.py AA:BB:CC:DD:EE:FF --duration 600 --debug
+```
+
+Before connecting:
+
+1. Disconnect the 558s in the phone app: a connected device does not advertise.
+2. On Windows, **pair** the 558s in the Bluetooth settings first. Without pairing, the device accepts the connection but sends no notification.
+
+Output example (illustrative values):
+
+```
+10:24:03 LP=0.00 HP=0.00 T1=19.53 Patm=101320.00 ...
+```
+
+### Analysis tools
+
+| Script | Purpose |
+|---|---|
+| `scan.py` | list nearby BLE devices that look like testo instruments |
+| `gatt.py` | list GATT services and print notifications (read-only, never writes) |
+| `btsnoop.py` | list ATT packets per connection from an Android btsnoop capture |
+| `testo_values.py` | decode `Measurement.Values` frames from `btsnoop.py` output |
+| `snooz.py` | decode the btsnooz summary of an Android bug report (HCI events only on recent Android) |
+
+## Limitations
+
+- **Pressure units are not confirmed.** LP and HP carry status `0xfd00`; whether values are bar or Pa has not been verified under pressure yet.
+- Only the commands above are used. Other command codes have not been explored, on purpose: writing unknown bytes to a measuring instrument could change its settings.
+- Tested with one 558s and Windows 10 only.
+- The vendor app and this script cannot be connected at the same time.
+
+## Disclaimer
+
+This software is provided "as is", without warranty (see [LICENSE](LICENSE)).
+Values read with it are **not** certified measurements: do not use them for regulatory records (refrigerant handling, leak checks) or safety decisions.
+Use it at your own risk on your own equipment.
+
+## License
+
+[MIT](LICENSE)
+
+---
+
+## Résumé en français
+
+**manifold-558s-ble** lit en direct, depuis un PC et en Python, les mesures d'un manifold numérique **testo 558s** par Bluetooth LE, sans l'appli du fabricant.
+
+- **Projet indépendant et non officiel**, sans lien avec Testo SE & Co. KGaA. « testo » est une marque de Testo SE & Co. KGaA, citée uniquement pour désigner le matériel compatible.
+- **Méthode** : observation du trafic Bluetooth entre notre propre manifold et notre propre téléphone, pendant l'usage normal de l'appli. Aucun logiciel du fabricant n'a été décompilé. Le but est l'interopérabilité.
+- **Protocole** : service `fff0`, commandes écrites sur `fff1`, réponses en notification sur `fff2`. Trame = commande, séquence, longueur, CRC16 MODBUS de l'en-tête, puis charge suivie de son propre CRC16 MODBUS. La commande `11` abonne le PC aux mesures, poussées environ toutes les 0,8 s.
+- **Utilisation** : `pip install -r requirements.txt`, puis `python testo558.py <adresse Bluetooth>`. Sous Windows, coupler d'abord le 558s dans les paramètres Bluetooth. Le déconnecter de l'appli téléphone.
+- **Limites** : unité des pressions (bar ou Pa) pas encore confirmée sous pression. Testé avec un seul 558s, sous Windows 10.
+- **Avertissement** : mesures non certifiées, à ne pas utiliser pour un relevé réglementaire. Logiciel fourni sans garantie (licence MIT).
