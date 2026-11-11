@@ -1,6 +1,8 @@
 # manifold-558s-ble
 
-Read live measurements from a **testo 558s** digital refrigeration manifold over Bluetooth LE, from a PC, in Python, without the vendor app.
+Read live measurements from a **testo 558s** manifold or a **testo 115i** clamp thermometer over Bluetooth LE, from a PC, in Python, without the vendor app.
+
+This fork of [damtro/manifold-558s-ble](https://github.com/damtro/manifold-558s-ble) adds a direct 115i reader, shared framing/transport, CSV logging, tests, and a Windows test launcher. The original 558s reader is unchanged.
 
 > **Independent, unofficial project.**
 > It is not affiliated with, endorsed by or supported by Testo SE & Co. KGaA.
@@ -27,7 +29,7 @@ Keywords: testo 558s, digital manifold, refrigeration gauge, HVAC, HVAC-R, air c
 | Device | Status |
 |---|---|
 | testo 558s digital manifold | Live values read on Windows 10 with [bleak](https://github.com/hbldh/bleak) |
-| testo 115i clamp thermometer (Smart Probe) | Direct streaming reported on Windows with contributor's prototype; revised `testo115.py` awaiting hardware retest |
+| testo 115i clamp thermometer (Smart Probe) | CRC-validated direct temperature and battery streaming captured on Windows; intentional power-off/disconnect confirmed error reporting and CSV preservation |
 
 Other testo Bluetooth instruments may use the same framing, but they have not been tested.
 
@@ -140,30 +142,89 @@ python testo115.py AA:BB:CC:DD:EE:FF --duration 60 --debug
 ```
 
 The address is required; no personal address is embedded. On macOS use the UUID
-reported by the scanner. The contributor's original prototype streamed on one
-Windows device; this revised version and other platforms await hardware testing.
+reported by the scanner. This revision streamed on one Windows probe using Python 3.14.10 and Bleak 3.1.0.
+Direct 115i operation on Linux and macOS has not been hardware tested.
 
-The prototype finds `LineTemperature` and `BatteryLevel` markers immediately
-followed by little-endian Float32 values, interpreted as °C and percent.
-Temperature is also displayed in °F. The revised script preserves that approach;
-the full property schema and status fields are not established. Non-finite
-values are skipped.
+The captured `10 80` pushes contain a length-prefixed property name followed
+by a little-endian Float32: `LineTemperature` or `BatteryLevel`. The reader
+finds those markers and interprets their values as °C and percent, displaying
+temperature in °F as well. The temperature payload also had two trailing bytes
+(`01 00`) whose meaning is unknown. The full property schema, status semantics,
+and units/accuracy against the vendor app remain unverified. Non-finite values
+are skipped.
 
-The parser reassembles `10 80` pushes using a four-byte length, with the
-prototype's conservative 512-byte bound. Other frame types are ignored;
-successful writes do not prove session acceptance. `--debug` prints all raw
-notifications and commands.
+`testo_ble.py` provides shared BLE transport and frame handling for future probe
+drivers. It subscribes before sending startup commands, validates header and
+payload CRC-16/MODBUS checksums, and reads the full four-byte little-endian length
+at byte 2. Fragmented and combined notifications are supported, including empty
+replies; lengths over 1 MiB are rejected as a resource limit. The 115i driver
+extracts properties only from `10 80` pushes. No 549i compatibility is claimed.
 
-CRC enforcement is off by default: the documented 558s CRC scheme has not been
-checked against a retained 115i capture. Test it explicitly with:
+CRC validation is always enabled (`--verify-crc` remains a compatibility option).
+Both CRCs have been checked against the retained 115i notifications described
+below. Successful command writes alone do not prove session acceptance.
+`--debug` prints raw commands and notifications.
+
+Create a CSV log with UTC timestamps, Celsius, Fahrenheit, and battery percent:
 
 ```bash
-python testo115.py AA:BB:CC:DD:EE:FF --duration 60 --verify-crc --debug
+python testo115.py AA:BB:CC:DD:EE:FF --duration 60 --csv readings.csv --debug
 ```
 
-That flag requires valid CRC-16/MODBUS checksums on the header and payload.
-Compare the revised readout with the Testo app before considering it validated
-on hardware. Ctrl+C stops streaming; `--duration` counts seconds after startup.
+Each CSV row represents one measurement push; properties absent from that push
+are left blank rather than copied from earlier readings. Rows are flushed as
+they arrive, and existing files are never overwritten. Battery values outside
+0–100 and non-finite values are skipped. Disconnects and file write failures
+produce an error exit. A timed session with no decoded measurements also reports
+an error; keep debug output to investigate CRC or schema incompatibility.
+Ctrl+C closes the connection and CSV file; `--duration` counts after startup.
+
+#### Windows launcher
+
+Install Python 3.11 or newer, download/extract the entire repository, and
+double-click [run_115i_test.bat](run_115i_test.bat). Keep
+[windows_test.py](windows_test.py) and the other scripts together. The launcher
+creates `.venv`, installs dependencies if needed (internet required), runs the
+offline tests, and asks for the probe address and duration. Leave the address
+blank to scan first. Use 60 seconds for baseline or 120 for warming/cooling.
+Disconnect the probe from the phone app and manifold first. The direct 115i
+test does not request a Windows pairing PIN.
+
+Each run saves `readings.csv`, `debug.log`, `offline-tests.log`, and
+`exit-code.txt` under a unique `test-results/<timestamp>/` directory. Setup and
+scan logs are saved when those steps run. These results and local ZIP bundles
+are excluded from Git. Logs can contain device identifiers; review before
+sharing publicly. Ctrl+C stops the reader; exit code 0 after an early stop
+means a clean stop, not a completed hardware test.
+
+#### Hardware validation (November 11, 2026)
+
+A user-supplied Windows capture from this revision was replayed through the
+CRC-validating decoder and compared row by row with its CSV:
+
+- 41 valid frames: three startup replies and 38 measurement pushes.
+- 36 temperature samples, interpreted as 23.58–28.63 °C, and two battery
+  samples, interpreted as 100%.
+- All 38 measurement pushes matched the CSV; zero rejected framing bytes
+  and no incomplete frame left at the end of the capture.
+- All 13 offline tests passed on Windows with Python 3.14.10; setup installed
+  Bleak 3.1.0. This is an observed configuration, not a minimum-version claim.
+- The user intentionally disconnected the probe after roughly 32 seconds of
+  measurements during the requested 60-second session. The reader correctly
+  reported `Probe disconnected`, preserved the CSV, and exited with code 1.
+  This was a deliberate disconnect-handling test, not an unexpected failure.
+
+This confirms direct streaming, CRC compatibility, CSV recording, and reported
+disconnect handling for one probe. No vendor-app comparison, battery discharge
+comparison, Ctrl+C/reconnection check, or long-duration stability result was
+supplied. Those checks remain outstanding. Raw captures
+and device identifiers are not included in the repository.
+
+Run the offline parser, CSV, and simulated BLE transport checks:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ### Analysis tools
 
@@ -179,7 +240,8 @@ on hardware. Ctrl+C stops streaming; `--duration` counts seconds after startup.
 
 - **Pressure units are not confirmed.** LP and HP carry status `0xfd00`; whether values are bar or Pa has not been verified under pressure yet.
 - Only the commands above are used. Other command codes have not been explored, on purpose: writing unknown bytes to a measuring instrument could change its settings.
-- Tested with one 558s and Windows 10 only.
+- The original 558s reader was tested with one manifold on Windows 10. The
+  direct 115i reader has the separate Windows validation and limits above.
 - The vendor app and this script cannot be connected at the same time.
 
 ## Disclaimer
@@ -207,5 +269,5 @@ Mots-clés : manifold numérique, analyseur frigorifique, climatisation, pompe �
 - **Méthode** : observation du trafic Bluetooth entre notre propre manifold et notre propre téléphone, pendant l'usage normal de l'appli. Aucun logiciel du fabricant n'a été décompilé. Le but est l'interopérabilité.
 - **Protocole** : service `fff0`, commandes écrites sur `fff1`, réponses en notification sur `fff2`. Trame = commande, séquence, longueur, CRC16 MODBUS de l'en-tête, puis charge suivie de son propre CRC16 MODBUS. La commande `11` abonne le PC aux mesures, poussées environ toutes les 0,8 s.
 - **Utilisation** : `pip install -r requirements.txt`, puis `python testo558.py <adresse Bluetooth>`. Sous Windows, coupler d'abord le 558s dans les paramètres Bluetooth. Le déconnecter de l'appli téléphone.
-- **Limites** : unité des pressions (bar ou Pa) pas encore confirmée sous pression. Testé avec un seul 558s, sous Windows 10.
+- **Limites** : unité des pressions (bar ou Pa) pas encore confirmée sous pression. Lecteur 558s testé avec un seul manifold sous Windows 10. Le lecteur direct 115i a fourni des trames valides (CRC) et un CSV sous Windows ; une déconnexion volontaire a confirmé le signalement de la déconnexion et la conservation du CSV. La comparaison avec l’application et la stabilité sur une longue durée restent à vérifier.
 - **Avertissement** : mesures non certifiées, à ne pas utiliser pour un relevé réglementaire. Logiciel fourni sans garantie (licence MIT).

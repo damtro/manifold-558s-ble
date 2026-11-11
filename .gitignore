@@ -24,3 +24,10 @@ dumpstate*
 # File sync clients
 .sync_*.db*
 .owncloudsync.log
+
+# Local Windows probe test output
+test-results/
+
+.DS_Store
+
+deliverables/
